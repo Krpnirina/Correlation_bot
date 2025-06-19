@@ -1,363 +1,266 @@
-import tkinter as tk
-from tkinter import messagebox, scrolledtext
-import websocket
-import threading
+import asyncio
+import websockets
 import json
-import time
-import datetime
+import csv
+from datetime import datetime, timezone, timedelta
+from collections import deque, defaultdict
 
-# --- Configuration ---
-API_TOKEN = "REzKac9b5BR7DmF"
-APP_ID = "71130"
-WS_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
-SYMBOL = "R_100"
-CONTRACT_DURATION = 60  # 60 minutes = 1 hour
+# --- CONFIGURATION ---
+CSV_FILE = "daily_trades.csv"
+STRONG_LEVEL_THRESHOLD = 3  # Ovaina ho 3 izao fa tsy 5 intsony
+TICKS_WINDOW_HOURS = 24
+MIN_TICKS_REQUIRED = 300
+VOLUME_THRESHOLD = 1000  # Seuil minimal volume candle hanamarinana
 
-# Multi-timeframe candles
-TIMEFRAMES = ["15m", "30m", "1h"]
+API_TOKEN = "REzKac9b5BR7DmF"  # Apetraho ny token anao eto
+APP_ID = 71130  # Raha ilaina (efa apetraka ao amin'ny URL matetika)
 
-class DerivBotApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Deriv Trading Bot")
-        self.ws = None
-        self.ws_thread = None
-        self.running = False
-        self.balance = None
-        self.last_price = None
-        self.status = "Disconnected"
-        self.win_count = 0
-        self.loss_count = 0
+# Lisitra feno (mialoha fanivanana)
+YOUR_FULL_SYMBOL_LIST = [
+    "R_50", "R_75", "R_10", "R_25", "R_100", "frxEURUSD", "frxUSDJPY", "frxGBPUSD", "frxUSDCHF", "frxAUDUSD", "frxUSDCAD", "frxNZDUSD",
+    "frxEURGBP", "frxEURJPY", "frxGBPJPY", "frxAUDJPY", "frxEURAUD", "frxGBPAUD", "frxNZDJPY", "frxUSDPLN",
+    "frxUSDMXN", "frxXAUUSD", "frxXAGUSD", "frxXPTUSD", "frxXPDUSD"
+]
 
-        # Stockage candles multi-timeframe { timeframe: last_candle }
-        self.candles = {tf: None for tf in TIMEFRAMES}
-        # Stockage volume ticks vs transaction volume (derain update)
-        self.volume_ticks = 0
-        self.volume_transaction = 0
+# Lisitra eken'ny API websocket (valid symbols)
+VALID_SYMBOLS = {
+    "R_50", "R_75", "R_10", "R_25", "R_100", "frxEURUSD", "frxUSDJPY", "frxGBPUSD", "frxUSDCHF", "frxAUDUSD", "frxUSDCAD", "frxNZDUSD",
+    "frxEURGBP", "frxEURJPY", "frxGBPJPY", "frxAUDJPY", "frxEURAUD", "frxGBPAUD", "frxNZDJPY", "frxUSDPLN",
+    "frxUSDMXN", "frxXAUUSD", "frxXAGUSD", "frxXPTUSD", "frxXPDUSD"
+}
 
-        self.create_widgets()
-        self.log("Application started")
+# Filtrage ny lisitra mba ho eken'ny API fotsiny
+SYMBOLS = [sym for sym in YOUR_FULL_SYMBOL_LIST if sym in VALID_SYMBOLS]
 
-    def create_widgets(self):
-        frame_status = tk.Frame(self.root)
-        frame_status.pack(padx=10, pady=5, fill="x")
+GRANULARITIES = ["1d", "4h", "15m"]
 
-        tk.Label(frame_status, text="Bot Status:").grid(row=0, column=0, sticky="w")
-        self.lbl_status = tk.Label(frame_status, text=self.status, fg="red")
-        self.lbl_status.grid(row=0, column=1, sticky="w")
+GRANULARITY_MAP = {
+    "15m": 900,
+    "4h": 14400,
+    "1d": 86400
+}
 
-        tk.Label(frame_status, text="Symbole:").grid(row=1, column=0, sticky="w")
-        self.lbl_symbol = tk.Label(frame_status, text=SYMBOL)
-        self.lbl_symbol.grid(row=1, column=1, sticky="w")
+# --- DATA STORAGE ---
+daily_data = defaultdict(lambda: {
+    "ticks": deque(),
+    "support_hits": defaultdict(int),
+    "resistance_hits": defaultdict(int),
+    "levels_printed": set(),
+    "signal_counts": 0
+})
 
-        tk.Label(frame_status, text="Dernier Prix:").grid(row=2, column=0, sticky="w")
-        self.lbl_last_price = tk.Label(frame_status, text="N/A")
-        self.lbl_last_price.grid(row=2, column=1, sticky="w")
+candles_data = defaultdict(lambda: {
+    "1d": None,
+    "4h": None,
+    "15m": None
+})
 
-        tk.Label(frame_status, text="Balance:").grid(row=3, column=0, sticky="w")
-        self.lbl_balance = tk.Label(frame_status, text="N/A")
-        self.lbl_balance.grid(row=3, column=1, sticky="w")
+# --- CSV INITIALIZATION ---
+def initialize_csv():
+    with open(CSV_FILE, mode='w', newline='') as file:
+        csv.writer(file).writerow([
+            "date", "symbol", "price", "level_type", "strength",
+            "daily_min", "daily_max", "timestamp_utc"
+        ])
 
-        tk.Label(frame_status, text="Win/Loss:").grid(row=4, column=0, sticky="w")
-        self.lbl_win_loss = tk.Label(frame_status, text="0 / 0")
-        self.lbl_win_loss.grid(row=4, column=1, sticky="w")
+# --- FORMAT & LOG OUTPUT ---
+def print_level(symbol, price, level_type, strength, daily_min, daily_max, timestamp):
+    color = "\033[91m" if level_type == "SUPPORT" else "\033[92m"
+    reset = "\033[0m"
+    time_str = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S UTC')
+    diff = abs(price - (daily_min if level_type == "SUPPORT" else daily_max))
+    strength_display = "★" * min(strength, 3) + "!" * max(0, strength - 3)
 
-        frame_buttons = tk.Frame(self.root)
-        frame_buttons.pack(padx=10, pady=5, fill="x")
+    print(f"{color}┏{'━'*60}┓")
+    print(f"┃ {'DAILY '+level_type.ljust(15)} {symbol} @ {price:.5f} (Strength: {strength_display})")
+    print(f"┃ {'Range:'.ljust(15)} {daily_min:.5f} - {daily_max:.5f} (Diff: {diff:.5f})")
+    print(f"┃ {'Time:'.ljust(15)} {time_str}")
+    print(f"┗{'━'*60}┛{reset}")
 
-        self.btn_start = tk.Button(frame_buttons, text="Lancer le Bot", command=self.start_bot)
-        self.btn_start.grid(row=0, column=0, padx=5)
+    with open(CSV_FILE, mode='a', newline='') as file:
+        csv.writer(file).writerow([
+            datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            symbol, price, level_type, strength, daily_min, daily_max, time_str
+        ])
 
-        self.btn_stop = tk.Button(frame_buttons, text="Arrêter le Bot", command=self.stop_bot, state="disabled")
-        self.btn_stop.grid(row=0, column=1, padx=5)
+# --- VOLUME CHECK FUNCTION ---
+def volume_confirmed(symbol):
+    c1d = candles_data[symbol]["1d"]
+    c4h = candles_data[symbol]["4h"]
+    c15m = candles_data[symbol]["15m"]
 
-        self.btn_balance = tk.Button(frame_buttons, text="Afficher Balance", command=self.request_balance)
-        self.btn_balance.grid(row=0, column=2, padx=5)
+    if not c1d or not c4h or not c15m:
+        return False
 
-        self.btn_quit = tk.Button(frame_buttons, text="Quitter", command=self.quit_app)
-        self.btn_quit.grid(row=0, column=3, padx=5)
+    return (c1d["volume"] >= VOLUME_THRESHOLD and
+            c4h["volume"] >= VOLUME_THRESHOLD and
+            c15m["volume"] >= VOLUME_THRESHOLD)
 
-        frame_log = tk.Frame(self.root)
-        frame_log.pack(padx=10, pady=5, fill="both", expand=True)
+# --- HANDLE CANDLES ---
+async def handle_candle(candle_data):
+    symbol = candle_data["symbol"]
+    granularity_seconds = candle_data["granularity"]
+    gran_key = None
+    for k, v in GRANULARITY_MAP.items():
+        if v == granularity_seconds:
+            gran_key = k
+            break
+    if not gran_key:
+        return
 
-        self.txt_log = scrolledtext.ScrolledText(frame_log, height=15, state="disabled", wrap="word")
-        self.txt_log.pack(fill="both", expand=True)
+    candles_data[symbol][gran_key] = {
+        "close": candle_data["close"],
+        "volume": candle_data["volume"],
+        "epoch": candle_data["epoch"]
+    }
 
-    def log(self, message):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.txt_log.configure(state="normal")
-        self.txt_log.insert(tk.END, f"[{timestamp}] {message}\n")
-        self.txt_log.configure(state="disabled")
-        self.txt_log.see(tk.END)
+# --- HANDLE TICK ---
+async def handle_tick(tick):
+    symbol = tick['symbol']
+    price = float(tick['quote'])
+    timestamp = tick['epoch']
+    now = datetime.now(timezone.utc)
 
-    def start_bot(self):
-        if self.running:
-            self.log("Bot déjà en marche")
-            return
-        self.running = True
-        self.status = "Connecting..."
-        self.update_status()
-        self.log("Connexion au WebSocket Deriv...")
-        self.ws_thread = threading.Thread(target=self.run_ws)
-        self.ws_thread.daemon = True
-        self.ws_thread.start()
-        self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
+    data = daily_data[symbol]
+    data["ticks"].append((price, now))
 
-    def stop_bot(self):
-        if not self.running:
-            self.log("Bot déjà arrêté")
-            return
-        self.running = False
-        self.status = "Disconnecting..."
-        self.update_status()
-        if self.ws:
-            self.ws.close()
-        self.btn_start.config(state="normal")
-        self.btn_stop.config(state="disabled")
-        self.log("Bot arrêté")
+    # Remove old ticks (> TICKS_WINDOW_HOURS)
+    while data["ticks"] and (now - data["ticks"][0][1]) > timedelta(hours=TICKS_WINDOW_HOURS):
+        data["ticks"].popleft()
 
-    def quit_app(self):
-        self.stop_bot()
-        self.root.quit()
+    if len(data["ticks"]) % 25 == 0:
+        print(f"\033[94m[{symbol}] ➜ {len(data['ticks'])} ticks voaray hatreto\033[0m")
 
-    def update_status(self):
-        self.lbl_status.config(text=self.status, fg="green" if self.running else "red")
+    if len(data["ticks"]) >= MIN_TICKS_REQUIRED:
+        prices = [p for p, _ in data["ticks"]]
+        daily_min, daily_max = min(prices), max(prices)
+        range_val = daily_max - daily_min
+        support_zone = daily_min + (range_val * 0.05)
+        resistance_zone = daily_max - (range_val * 0.05)
 
-    def update_last_price(self, price):
-        self.last_price = price
-        self.lbl_last_price.config(text=f"{price:.2f}")
+        # SUPPORT detection
+        if price <= support_zone:
+            key = f"SUPPORT_{daily_min:.5f}"
+            data["support_hits"][key] += 1
+            strength = data["support_hits"][key]
 
-    def update_balance(self, balance):
-        self.balance = balance
-        self.lbl_balance.config(text=f"{balance:.2f}")
+            if (strength >= STRONG_LEVEL_THRESHOLD and
+                key not in data["levels_printed"] and
+                volume_confirmed(symbol)):
+                if data["signal_counts"] < 2:
+                    data["levels_printed"].add(key)
+                    data["signal_counts"] += 1
+                    print_level(symbol, price, "SUPPORT", strength, daily_min, daily_max, timestamp)
 
-    def update_win_loss(self):
-        self.lbl_win_loss.config(text=f"{self.win_count} / {self.loss_count}")
+        # RESISTANCE detection
+        elif price >= resistance_zone:
+            key = f"RESISTANCE_{daily_max:.5f}"
+            data["resistance_hits"][key] += 1
+            strength = data["resistance_hits"][key]
 
-    def request_balance(self):
-        if self.ws and self.running:
-            self.log("Demande de balance...")
-            get_account_status_msg = {"get_account_status": 1}
-            self.ws.send(json.dumps(get_account_status_msg))
-            self.log("Request sent: get_account_status")
-        else:
-            self.log("WebSocket non connecté ou bot non démarré")
+            if (strength >= STRONG_LEVEL_THRESHOLD and
+                key not in data["levels_printed"] and
+                volume_confirmed(symbol)):
+                if data["signal_counts"] < 2:
+                    data["levels_printed"].add(key)
+                    data["signal_counts"] += 1
+                    print_level(symbol, price, "RESISTANCE", strength, daily_min, daily_max, timestamp)
 
-    def buy_rise_fall(self, action, amount=1):
-        """
-        Envoi une commande d'achat Rise ou Fall
-        action: "rise" ou "fall"
-        amount: montant du stake en USD
-        """
-        if not self.ws:
-            self.log("WebSocket non connecté")
-            return
+# --- SUBSCRIBE TICKS AND CANDLES ---
+async def subscribe_data():
+    url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+    try:
+        async with websockets.connect(url) as ws:
+            print("\033[95m● Connecting and authorizing...\033[0m")
 
-        contract_type = "rise" if action.lower() == "rise" else "fall"
-        msg = {
-            "buy": 1,
-            "parameters": {
-                "contract_type": contract_type,
-                "symbol": SYMBOL,
-                "amount": amount,
-                "duration": CONTRACT_DURATION,
-                "duration_unit": "m",
-                "basis": "stake",
-                "currency": "USD",
-            },
-            "subscribe": 1
-        }
-        self.ws.send(json.dumps(msg))
-        self.log(f"Trade envoyé: {action.upper()} {amount} USD durée {CONTRACT_DURATION} min")
+            # Authorization request
+            await ws.send(json.dumps({
+                "authorize": API_TOKEN
+            }))
 
-    def analyze_candle_direction(self, candle):
-        # Retourne "up" si bougie haussière, "down" si baissière
-        if candle is None:
-            return None
-        return "up" if candle["close"] > candle["open"] else "down"
+            # Wait for authorization confirmation
+            auth_resp = await ws.recv()
+            auth_data = json.loads(auth_resp)
+            if auth_data.get("error"):
+                print(f"\033[91m● Authorization failed: {auth_data['error']}\033[0m")
+                return
 
-    def all_timeframes_agree(self):
-        directions = []
-        for tf in TIMEFRAMES:
-            dir = self.analyze_candle_direction(self.candles[tf])
-            if dir is None:
-                return False
-            directions.append(dir)
-        # Jereo raha mitovy daholo
-        return all(d == directions[0] for d in directions)
+            print("\033[92m● Authorized successfully.\033[0m")
 
-    def decide_trade(self):
-        """
-        Logique selon :
-        - Volume ticks vs volume transaction (fampitahana "matanjaka" na "tsy matanjaka")
-        - Direction bougies farany M15, M30, H1
-        """
-        if not self.all_timeframes_agree():
-            self.log("Timeframes tsy mitovy direction, tsy manao trade")
-            return None  # Tsy mitovy direction
+            print("\033[95m● Subscribing to ticks and candles...\033[0m")
 
-        candle_dir = self.analyze_candle_direction(self.candles[TIMEFRAMES[0]])  # Direction M15
+            # Subscribe ticks for valid symbols only
+            for symbol in SYMBOLS:
+                await ws.send(json.dumps({"ticks": symbol, "subscribe": 1}))
+                print(f"  ✓ Tick: {symbol}")
+                await asyncio.sleep(0.3)
 
-        volume_ratio = self.volume_ticks / self.volume_transaction if self.volume_transaction > 0 else 0
+            # Subscribe candles with granularity for valid symbols only
+            for symbol in SYMBOLS:
+                for gran in GRANULARITIES:
+                    gran_sec = GRANULARITY_MAP.get(gran)
+                    if gran_sec is None:
+                        print(f"Warning: Unknown granularity {gran}, skipping.")
+                        continue
+                    await ws.send(json.dumps({
+                        "candles": symbol,
+                        "granularity": gran_sec,
+                        "subscribe": 1
+                    }))
+                    print(f"  ✓ Candle {gran}: {symbol}")
+                    await asyncio.sleep(0.2)
 
-        # Famaritana hoe matanjaka ny volume ticks raha > 1.5 ny ratio (azonao ovaina araka ny fitsapana)
-        volume_strong = volume_ratio > 1.5
+            print(f"\n\033[95m● TRACKING {len(SYMBOLS)} symbols with volume confirmation (D1,H4,M15)\033[0m\n")
 
-        # Règles trading araka ny fanazavana
-        if volume_strong and candle_dir == "down":
-            return "SELL"
-        elif volume_strong and candle_dir == "up":
-            return "BUY"
-        elif not volume_strong and candle_dir == "down":
-            return "BUY"
-        elif not volume_strong and candle_dir == "up":
-            return "SELL"
+            async for message in ws:
+                if message == "ping":
+                    await ws.send("pong")
+                    continue
 
-        return None
+                try:
+                    data = json.loads(message)
 
-    def execute_trade(self, action, price):
-        if action not in ["BUY", "SELL"]:
-            self.log("Action de trade invalide")
-            return
+                    # Market closed handler
+                    if 'error' in data:
+                        error_code = data['error'].get('code')
+                        if error_code == "MarketIsClosed":
+                            print(f"\033[93m● Market closed for symbol: {data['error'].get('details', {}).get('field', 'unknown')}\033[0m")
+                        elif error_code == "UnrecognisedRequest":
+                            print(f"\033[91m● API Error: Unrecognised request (possibly invalid subscription)\033[0m")
+                        else:
+                            print(f"\033[91m● API Error: {data['error']}\033[0m")
+                        continue
 
-        self.log(f"Execution trade: {action} au prix {price:.2f}")
-        # Mampiasa buy_rise_fall avec contract duration 60 min
-        if action == "BUY":
-            self.buy_rise_fall("rise")
-        else:
-            self.buy_rise_fall("fall")
+                    if 'tick' in data:
+                        await handle_tick(data['tick'])
+                    elif 'candles' in data:
+                        await handle_candle(data['candles'])
+                except json.JSONDecodeError:
+                    print(f"\033[93m● Invalid JSON message: {message[:100]}...\033[0m")
 
-    def subscribe_ticks(self, ws):
-        # Abonne à ticks
-        tick_req = {"ticks": SYMBOL, "subscribe": 1}
-        ws.send(json.dumps(tick_req))
-        self.log("Subscription ticks envoyée")
+    except websockets.exceptions.ConnectionClosedError:
+        print("\033[91m● Server closed connection, reconnecting...\033[0m")
+        await asyncio.sleep(5)
+        await subscribe_data()
+    except Exception as e:
+        print(f"\033[91m● Unexpected error: {e}\033[0m")
+        raise
 
-    def subscribe_candles(self, ws, timeframe):
-        # Subscribe candles pour timeframe (ex: 15m, 30m, 1h)
-        req = {
-            "ticks_history": SYMBOL,
-            "end": "latest",
-            "count": 1,
-            "style": "candles",
-            "granularity": self.timeframe_to_seconds(timeframe),
-            "subscribe": 1
-        }
-        ws.send(json.dumps(req))
-        self.log(f"Subscription candles {timeframe} envoyée")
+# --- MAIN ---
+async def main():
+    initialize_csv()
+    while True:
+        try:
+            await subscribe_data()
+        except Exception as e:
+            print(f"\033[91m● Reconnection due to error: {e} (Retrying in 10s)\033[0m")
+            await asyncio.sleep(10)
 
-    def timeframe_to_seconds(self, timeframe):
-        # Convertir timeframe string en secondes
-        unit = timeframe[-1]
-        value = int(timeframe[:-1])
-        if unit == "m":
-            return value * 60
-        elif unit == "h":
-            return value * 3600
-        else:
-            return 60  # default 1 minute
-
-    def on_message(self, ws, message):
-        data = json.loads(message)
-        self.log(f"Message reçu: {message}")
-
-        if "authorize" in data:
-            if data["authorize"].get("error") is None:
-                self.status = "Bot Running"
-                self.update_status()
-                self.update_balance(data["authorize"].get("balance", 0))
-                self.log(f"Autorisation réussie. Solde: {self.balance}")
-                self.subscribe_ticks(ws)
-                for tf in TIMEFRAMES:
-                    self.subscribe_candles(ws, tf)
-            else:
-                self.status = "Erreur Authorization"
-                self.update_status()
-                error_msg = data["authorize"].get("error", {}).get("message", "Unknown error")
-                self.log(f"Erreur autorisation: {error_msg}")
-                ws.close()
-
-        elif "tick" in data:
-            price = data["tick"]["quote"]
-            self.update_last_price(price)
-
-            # Mety haka volume ticks eto raha misy (raha tsy misy dia 0 fotsiny)
-            self.volume_ticks = data["tick"].get("volume", 0)
-
-            # Raha afaka mandray trade isika dia atao fanapahan-kevitra eto
-            trade_decision = self.decide_trade()
-            if trade_decision:
-                self.execute_trade(trade_decision, price)
-
-        elif "history" in data:
-            # Candles (tsirairay timeframe)
-            candles = data["history"].get("candles", [])
-            gran = data["history"].get("granularity")
-            timeframe = self.seconds_to_timeframe(gran)
-            if candles:
-                self.candles[timeframe] = candles[-1]  # dernier candle
-                self.log(f"Candle {timeframe} mise à jour")
-
-        elif "buy" in data:
-            # Réponse achat contrat
-            bought = data["buy"]
-            if bought.get("contract_id"):
-                self.log(f"Trade contract_id: {bought['contract_id']} acheté")
-            else:
-                self.log("Erreur achat contrat")
-
-        elif "get_account_status" in data:
-            bal = data["get_account_status"].get("balance")
-            if bal is not None:
-                self.update_balance(bal)
-
-        elif "error" in data:
-            error_msg = data["error"].get("message", "Unknown error")
-            self.log(f"Erreur API: {error_msg}")
-
-    def seconds_to_timeframe(self, seconds):
-        if seconds == 900:
-            return "15m"
-        elif seconds == 1800:
-            return "30m"
-        elif seconds == 3600:
-            return "1h"
-        else:
-            return None
-
-    def on_error(self, ws, error):
-        self.status = "Erreur WebSocket"
-        self.update_status()
-        self.log(f"Erreur WebSocket: {error}")
-
-    def on_close(self, ws, close_status_code, close_msg):
-        self.status = "Déconnecté"
-        self.update_status()
-        self.log(f"Connexion fermée: {close_status_code} - {close_msg}")
-
-    def on_open(self, ws):
-        self.log("Connexion WebSocket ouverte, envoi d'autorisation...")
-        auth_data = {"authorize": API_TOKEN}
-        ws.send(json.dumps(auth_data))
-
-    def run_ws(self):
-        self.ws = websocket.WebSocketApp(
-            WS_URL,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close,
-        )
-        while self.running:
-            try:
-                self.ws.run_forever()
-            except Exception as e:
-                self.log(f"Exception WebSocket: {e}")
-                time.sleep(5)
-
-
+# --- RUN ---
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DerivBotApp(root)
-    root.mainloop()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\033[94m● Tracking stopped by user.\033[0m")
+    except Exception as e:
+        print(f"\033[91m● Fatal error: {e}\033[0m")
