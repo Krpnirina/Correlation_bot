@@ -7,17 +7,17 @@ from collections import deque, defaultdict
 
 # --- CONFIGURATION ---
 CSV_FILE = "daily_trades.csv"
-STRONG_LEVEL_THRESHOLD = 2  # Reduced from 3 to 2 for earlier signals [user request]
-SUPPORT_ZONE_PERCENT = 0.10  # Widened from 5% to 10% [user request]
+STRONG_LEVEL_THRESHOLD = 2
+SUPPORT_ZONE_PERCENT = 0.10
 RESISTANCE_ZONE_PERCENT = 0.10
 TICKS_WINDOW_HOURS = 24
 MIN_TICKS_REQUIRED = 300
-VOLUME_THRESHOLD = 500  # Reduced from 1000 [user request]
-MAX_SIGNALS_PER_DAY = 4  # Increased from 2 [user request]
+VOLUME_THRESHOLD = 500
+MAX_SIGNALS_PER_DAY = 4
 API_TOKEN = "REzKac9b5BR7DmF"
 APP_ID = 71130
 
-# Symbol configuration [user request]
+# Symbol configuration
 VOLATILITY_INDICES = ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"]
 RANGE_BREAK_INDICES = ["R_10", "R_25", "R_50", "R_75", "R_100"]
 SYMBOLS = VOLATILITY_INDICES + RANGE_BREAK_INDICES
@@ -54,7 +54,7 @@ def volume_confirmed(symbol):
     c1d = candles_data[symbol]["1d"]
     c4h = candles_data[symbol]["4h"]
     c15m = candles_data[symbol]["15m"]
-    # Only one timeframe needed [optimization]
+    # Only one timeframe needed
     return any([
         c1d and c1d["volume"] >= VOLUME_THRESHOLD,
         c4h and c4h["volume"] >= VOLUME_THRESHOLD,
@@ -122,7 +122,7 @@ async def handle_tick(tick):
         daily_min, daily_max = min(prices), max(prices)
         range_val = daily_max - daily_min
         
-        # Dynamic zones [optimization]
+        # Dynamic zones
         support_zone = daily_min + (range_val * SUPPORT_ZONE_PERCENT)
         resistance_zone = daily_max - (range_val * RESISTANCE_ZONE_PERCENT)
 
@@ -158,38 +158,65 @@ async def subscribe_data():
     try:
         async with websockets.connect(url) as ws:
             # Authorization
-            await ws.send(json.dumps({"authorize": API_TOKEN}))
+            auth_msg = {"authorize": API_TOKEN}
+            await ws.send(json.dumps(auth_msg))
             auth_resp = json.loads(await ws.recv())
-            if auth_resp.get("error"):
+            
+            if "error" in auth_resp:
                 print(f"\033[91m● Authorization failed: {auth_resp['error']['message']}\033[0m")
                 return
+            print("\033[92m● Authorized successfully.\033[0m")
 
-            # Symbol subscriptions
+            # Prepare subscription requests
+            subscriptions = []
+            
+            # Tick subscriptions
             for symbol in SYMBOLS:
-                await ws.send(json.dumps({"ticks": symbol, "subscribe": 1}))
-                await asyncio.sleep(0.1)  # Rate limiting
+                subscriptions.append({"ticks": symbol, "subscribe": 1})
+            
+            # Candle subscriptions
+            for symbol in SYMBOLS:
                 for gran in GRANULARITIES:
-                    await ws.send(json.dumps({
+                    subscriptions.append({
                         "candles": symbol,
                         "granularity": GRANULARITY_MAP[gran],
                         "subscribe": 1
-                    }))
-                    await asyncio.sleep(0.1)
-
+                    })
+            
+            # Send subscriptions with rate limiting
+            print(f"\033[95m● Subscribing to {len(subscriptions)} data streams...\033[0m")
+            for i, sub in enumerate(subscriptions):
+                await ws.send(json.dumps(sub))
+                # Acknowledge every 10 subscriptions
+                if i % 10 == 0:
+                    resp = await ws.recv()
+                    data = json.loads(resp)
+                    if "error" in data:
+                        print(f"\033[93m● Subscription Error: {data['error']['message']}\033[0m")
+                await asyncio.sleep(0.05)  # Conservative rate limit
+            
             print(f"\n\033[95m● TRACKING {len(SYMBOLS)} SYMBOLS (Volatility:5 | RangeBreak:5)\033[0m\n")
 
             # Data processing loop
-            async for message in ws:
+            while True:
                 try:
+                    message = await asyncio.wait_for(ws.recv(), timeout=30)
                     data = json.loads(message)
+                    
                     if 'tick' in data:
                         await handle_tick(data['tick'])
                     elif 'candles' in data:
                         await handle_candle(data['candles'])
                     elif 'error' in data:
                         print(f"\033[93m● API Warning: {data['error']['message']}\033[0m")
+                    elif 'msg_type' in data and data['msg_type'] == 'authorize':
+                        continue  # Skip authorization responses
+                except asyncio.TimeoutError:
+                    # Send ping to maintain connection
+                    await ws.send(json.dumps({"ping": 1}))
                 except Exception as e:
-                    print(f"\033[91m● Processing Error: {str(e)[:80]}...\033[0m")
+                    print(f"\033[91m● Processing Error: {str(e)[:80]}\033[0m")
+                    await asyncio.sleep(1)
 
     except Exception as e:
         print(f"\033[91m● WebSocket Error: {str(e)[:100]} (Reconnecting in 10s)\033[0m")
