@@ -17,10 +17,11 @@ MAX_SIGNALS_PER_DAY = 4
 API_TOKEN = "REzKac9b5BR7DmF"
 APP_ID = 71130
 
-# Symbol configuration
-VOLATILITY_INDICES = ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"]
-RANGE_BREAK_INDICES = ["R_10", "R_25", "R_50", "R_75", "R_100"]
-SYMBOLS = VOLATILITY_INDICES + RANGE_BREAK_INDICES
+# All symbols are volatility indices
+SYMBOLS = [
+    "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
+    "R_10", "R_25", "R_50", "R_75", "R_100"
+]
 
 GRANULARITIES = ["1d", "4h", "15m"]
 GRANULARITY_MAP = {"15m": 900, "4h": 14400, "1d": 86400}
@@ -46,7 +47,7 @@ def initialize_csv():
         writer = csv.writer(file)
         writer.writerow([
             "timestamp_utc", "symbol", "price", "level_type", "strength",
-            "daily_min", "daily_max", "symbol_type", "volume_status"
+            "daily_min", "daily_max", "volume_status"
         ])
 
 # --- VOLUME CHECK (FLEXIBLE) ---
@@ -54,7 +55,6 @@ def volume_confirmed(symbol):
     c1d = candles_data[symbol]["1d"]
     c4h = candles_data[symbol]["4h"]
     c15m = candles_data[symbol]["15m"]
-    # Only one timeframe needed
     return any([
         c1d and c1d["volume"] >= VOLUME_THRESHOLD,
         c4h and c4h["volume"] >= VOLUME_THRESHOLD,
@@ -63,8 +63,6 @@ def volume_confirmed(symbol):
 
 # --- OUTPUT FORMATTING ---
 def print_level(symbol, price, level_type, strength, daily_min, daily_max, timestamp):
-    # Symbol type identification
-    symbol_type = "VOLATILITY" if symbol in VOLATILITY_INDICES else "RANGE_BREAK"
     color = "\033[91m" if level_type == "SUPPORT" else "\033[92m"
     reset = "\033[0m"
     
@@ -73,18 +71,17 @@ def print_level(symbol, price, level_type, strength, daily_min, daily_max, times
     vol_status = "✅" if volume_confirmed(symbol) else "❌"
 
     print(f"{color}┏{'━'*70}┓")
-    print(f"┃ {symbol_type} {level_type.ljust(12)} {symbol} @ {price:.5f} (Strength: {strength_display})")
+    print(f"┃ VOLATILITY {level_type.ljust(10)} {symbol} @ {price:.5f} (Strength: {strength_display})")
     print(f"┃ {'Range:'.ljust(10)} {daily_min:.5f} - {daily_max:.5f} | Vol: {vol_status}")
     print(f"┃ {'Time:'.ljust(10)} {time_str}")
     print(f"┗{'━'*70}┛{reset}")
 
-    # CSV logging with symbol type
     with open(CSV_FILE, mode='a', newline='') as file:
         writer = csv.writer(file)
         writer.writerow([
             datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
             symbol, price, level_type, strength,
-            daily_min, daily_max, symbol_type, vol_status
+            daily_min, daily_max, vol_status
         ])
 
 # --- CANDLE PROCESSING ---
@@ -109,20 +106,17 @@ async def handle_tick(tick):
     data = daily_data[symbol]
     data["ticks"].append((price, now))
 
-    # Maintain 24-hour window
     while data["ticks"] and (now - data["ticks"][0][1]) > timedelta(hours=TICKS_WINDOW_HOURS):
         data["ticks"].popleft()
 
-    # Periodic status update
     if len(data["ticks"]) % 25 == 0:
-        print(f"\033[94m[{symbol}] ➜ Collected {len(data['ticks'])} ticks | Max Signals: {MAX_SIGNALS_PER_DAY - data['signal_counts']} left today\033[0m")
+        print(f"\033[94m[{symbol}] ➜ Collected {len(data['ticks'])} ticks | Signals left: {MAX_SIGNALS_PER_DAY - data['signal_counts']}\033[0m")
 
     if len(data["ticks"]) >= MIN_TICKS_REQUIRED:
         prices = [p for p, _ in data["ticks"]]
         daily_min, daily_max = min(prices), max(prices)
         range_val = daily_max - daily_min
         
-        # Dynamic zones
         support_zone = daily_min + (range_val * SUPPORT_ZONE_PERCENT)
         resistance_zone = daily_max - (range_val * RESISTANCE_ZONE_PERCENT)
 
@@ -158,8 +152,7 @@ async def subscribe_data():
     try:
         async with websockets.connect(url) as ws:
             # Authorization
-            auth_msg = {"authorize": API_TOKEN}
-            await ws.send(json.dumps(auth_msg))
+            await ws.send(json.dumps({"authorize": API_TOKEN}))
             auth_resp = json.loads(await ws.recv())
             
             if "error" in auth_resp:
@@ -167,37 +160,38 @@ async def subscribe_data():
                 return
             print("\033[92m● Authorized successfully.\033[0m")
 
-            # Prepare subscription requests
-            subscriptions = []
+            # Subscribe to all symbols
+            print(f"\033[95m● Subscribing to {len(SYMBOLS)} volatility indices\033[0m")
             
-            # Tick subscriptions
             for symbol in SYMBOLS:
-                subscriptions.append({"ticks": symbol, "subscribe": 1})
-            
-            # Candle subscriptions
-            for symbol in SYMBOLS:
+                # Subscribe to ticks
+                tick_sub = {"ticks": symbol, "subscribe": 1}
+                await ws.send(json.dumps(tick_sub))
+                tick_resp = json.loads(await ws.recv())
+                if "error" in tick_resp:
+                    print(f"\033[93m● Tick Error ({symbol}): {tick_resp['error']['message']}\033[0m")
+                else:
+                    print(f"\033[92m● Subscribed to ticks for {symbol}\033[0m")
+                
+                # Subscribe to candles
                 for gran in GRANULARITIES:
-                    subscriptions.append({
+                    candle_sub = {
                         "candles": symbol,
                         "granularity": GRANULARITY_MAP[gran],
                         "subscribe": 1
-                    })
-            
-            # Send subscriptions with rate limiting
-            print(f"\033[95m● Subscribing to {len(subscriptions)} data streams...\033[0m")
-            for i, sub in enumerate(subscriptions):
-                await ws.send(json.dumps(sub))
-                # Acknowledge every 10 subscriptions
-                if i % 10 == 0:
-                    resp = await ws.recv()
-                    data = json.loads(resp)
-                    if "error" in data:
-                        print(f"\033[93m● Subscription Error: {data['error']['message']}\033[0m")
-                await asyncio.sleep(0.05)  # Conservative rate limit
-            
-            print(f"\n\033[95m● TRACKING {len(SYMBOLS)} SYMBOLS (Volatility:5 | RangeBreak:5)\033[0m\n")
+                    }
+                    await ws.send(json.dumps(candle_sub))
+                    candle_resp = json.loads(await ws.recv())
+                    if "error" in candle_resp:
+                        print(f"\033[93m● Candle Error ({symbol}/{gran}): {candle_resp['error']['message']}\033[0m")
+                    else:
+                        print(f"\033[92m● Subscribed to {gran} candles for {symbol}\033[0m")
+                
+                await asyncio.sleep(0.1)  # Rate limiting
 
-            # Data processing loop
+            print(f"\n\033[95m● TRACKING {len(SYMBOLS)} VOLATILITY INDICES\033[0m\n")
+
+            # Main processing loop
             while True:
                 try:
                     message = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -209,17 +203,14 @@ async def subscribe_data():
                         await handle_candle(data['candles'])
                     elif 'error' in data:
                         print(f"\033[93m● API Warning: {data['error']['message']}\033[0m")
-                    elif 'msg_type' in data and data['msg_type'] == 'authorize':
-                        continue  # Skip authorization responses
                 except asyncio.TimeoutError:
                     # Send ping to maintain connection
                     await ws.send(json.dumps({"ping": 1}))
                 except Exception as e:
                     print(f"\033[91m● Processing Error: {str(e)[:80]}\033[0m")
-                    await asyncio.sleep(1)
 
     except Exception as e:
-        print(f"\033[91m● WebSocket Error: {str(e)[:100]} (Reconnecting in 10s)\033[0m")
+        print(f"\033[91m● Connection Error: {str(e)[:100]} (Reconnecting in 10s)\033[0m")
         await asyncio.sleep(10)
         await subscribe_data()
 
@@ -227,7 +218,7 @@ async def subscribe_data():
 async def main():
     initialize_csv()
     print("\033[96m" + "━"*70)
-    print(f"● SYSTEM INITIALIZED | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"● VOLATILITY INDEX TRACKER | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"● SYMBOLS: {', '.join(SYMBOLS)}")
     print(f"● CONFIG: Strength={STRONG_LEVEL_THRESHOLD} hits | Signals/day={MAX_SIGNALS_PER_DAY}")
     print("━"*70 + "\033[0m")
