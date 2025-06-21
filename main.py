@@ -168,7 +168,6 @@ async def subscribe_data():
             for symbol in SYMBOLS:
                 tick_sub = {"ticks": symbol, "subscribe": 1}
                 await ws.send(json.dumps(tick_sub))
-                print(f"\033[93m● Sent tick subscription for {symbol}\033[0m")
                 await asyncio.sleep(0.05)
             
             # Batch 2: Candle subscriptions
@@ -180,7 +179,6 @@ async def subscribe_data():
                         "subscribe": 1
                     }
                     await ws.send(json.dumps(candle_sub))
-                    print(f"\033[93m● Sent candle subscription for {symbol}/{gran}\033[0m")
                     await asyncio.sleep(0.05)
             
             print("\033[92m● All subscriptions sent. Starting data processing...\033[0m")
@@ -193,17 +191,20 @@ async def subscribe_data():
                     data = json.loads(message)
                     
                     # Handle different message types
-                    if data.get("msg_type") == "tick":
-                        await handle_tick(data["tick"])
-                    elif data.get("msg_type") == "candles":
-                        await handle_candle(data["candles"])
-                    elif data.get("error"):
-                        print(f"\033[93m● API Warning: {data['error']['message']}\033[0m")
-                    elif data.get("echo_req"):
+                    if 'tick' in data:
+                        await handle_tick(data['tick'])
+                    elif 'candles' in data:
+                        await handle_candle(data['candles'])
+                    elif 'error' in data:
+                        # Skip "Unrecognised request" warnings
+                        if data['error']['code'] != 'UnrecognisedRequest':
+                            print(f"\033[93m● API Warning: {data['error']['message']}\033[0m")
+                    elif 'echo_req' in data:
                         # Skip echo responses
                         continue
                     else:
-                        print(f"\033[90m● Unhandled message: {data.get('msg_type')}\033[0m")
+                        # Skip unhandled messages
+                        continue
                     
                 except asyncio.TimeoutError:
                     # Send ping to maintain connection
