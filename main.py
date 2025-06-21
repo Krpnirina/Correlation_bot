@@ -6,10 +6,10 @@ from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 
 # --- CONFIGURATION ---
-CSV_FILE = "daily_trades.csv"
+CSV_FILE = "trading_signals.csv"
 STRONG_LEVEL_THRESHOLD = 2
-SUPPORT_ZONE_PERCENT = 0.10
-RESISTANCE_ZONE_PERCENT = 0.10
+SUPPORT_ZONE_PERCENT = 0.115  # Widened to 11.5%
+RESISTANCE_ZONE_PERCENT = 0.115
 TICKS_WINDOW_HOURS = 24
 MIN_TICKS_REQUIRED = 300
 VOLUME_THRESHOLD = 500
@@ -47,18 +47,24 @@ def initialize_csv():
         writer = csv.writer(file)
         writer.writerow([
             "timestamp_utc", "symbol", "price", "level_type", "strength",
-            "daily_min", "daily_max", "volume_status"
+            "daily_min", "daily_max", "volume_status", "position_recommendation"
         ])
 
-# --- VOLUME CHECK (FLEXIBLE) ---
+# --- VOLUME CHECK (RELAXED) ---
 def volume_confirmed(symbol):
     c1d = candles_data[symbol]["1d"]
     c4h = candles_data[symbol]["4h"]
     c15m = candles_data[symbol]["15m"]
+    
+    # Accept if any timeframe meets threshold, or if all have at least minimal volume
     return any([
-        c1d and c1d["volume"] >= VOLUME_THRESHOLD,
-        c4h and c4h["volume"] >= VOLUME_THRESHOLD,
-        c15m and c15m["volume"] >= VOLUME_THRESHOLD
+        (c1d and c1d["volume"] >= VOLUME_THRESHOLD),
+        (c4h and c4h["volume"] >= VOLUME_THRESHOLD),
+        (c15m and c15m["volume"] >= VOLUME_THRESHOLD),
+        (c1d and c4h and c15m and 
+         c1d["volume"] > 50 and 
+         c4h["volume"] > 50 and 
+         c15m["volume"] > 50)
     ])
 
 # --- OUTPUT FORMATTING ---
@@ -68,11 +74,15 @@ def print_level(symbol, price, level_type, strength, daily_min, daily_max, times
     
     time_str = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S UTC')
     strength_display = "★" * min(strength, 3) + "!" * max(0, strength - 3)
-    vol_status = "✅" if volume_confirmed(symbol) else "❌"
-
+    vol_status = "✅" if volume_confirmed(symbol) else "⚠️"
+    
+    # Position recommendation based on signal type
+    position_rec = "BUY" if level_type == "SUPPORT" else "SELL"
+    
     print(f"{color}┏{'━'*70}┓")
     print(f"┃ VOLATILITY {level_type.ljust(10)} {symbol} @ {price:.5f} (Strength: {strength_display})")
     print(f"┃ {'Range:'.ljust(10)} {daily_min:.5f} - {daily_max:.5f} | Vol: {vol_status}")
+    print(f"┃ {'Signal:'.ljust(10)} {position_rec} position recommended")
     print(f"┃ {'Time:'.ljust(10)} {time_str}")
     print(f"┗{'━'*70}┛{reset}")
 
@@ -81,7 +91,7 @@ def print_level(symbol, price, level_type, strength, daily_min, daily_max, times
         writer.writerow([
             datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
             symbol, price, level_type, strength,
-            daily_min, daily_max, vol_status
+            daily_min, daily_max, vol_status, position_rec
         ])
 
 # --- CANDLE PROCESSING ---
@@ -117,6 +127,7 @@ async def handle_tick(tick):
         daily_min, daily_max = min(prices), max(prices)
         range_val = daily_max - daily_min
         
+        # Dynamic zones
         support_zone = daily_min + (range_val * SUPPORT_ZONE_PERCENT)
         resistance_zone = daily_max - (range_val * RESISTANCE_ZONE_PERCENT)
 
@@ -181,8 +192,9 @@ async def subscribe_data():
                     await ws.send(json.dumps(candle_sub))
                     await asyncio.sleep(0.05)
             
-            print("\033[92m● All subscriptions sent. Starting data processing...\033[0m")
+            print("\033[92m● All subscriptions sent. Starting signal detection...\033[0m")
             print(f"\n\033[95m● TRACKING {len(SYMBOLS)} VOLATILITY INDICES\033[0m\n")
+            print("\033[93m● SYSTEM READY - Waiting for trading signals ●\033[0m")
 
             # Main processing loop
             while True:
@@ -217,13 +229,37 @@ async def subscribe_data():
         await asyncio.sleep(10)
         await subscribe_data()
 
+# --- POSITION MANAGEMENT FUNCTIONS ---
+async def execute_position(symbol, position_type, price):
+    """Simulated position execution (replace with real API calls)"""
+    print(f"\033[93m● [SIMULATION] Executing {position_type} position on {symbol} @ {price:.5f}\033[0m")
+    
+    # For real trading, you would add Deriv API calls here:
+    # 1. Get current price
+    # 2. Calculate stake
+    # 3. Send buy/sell request
+    # 4. Set stop loss/take profit
+    # 5. Monitor position
+    
+    # Example API call structure:
+    # trade_params = {
+    #     "buy": contract_id,
+    #     "price": price,
+    #     "amount": 10,
+    #     "symbol": symbol,
+    #     "duration": 60,
+    #     "duration_unit": "s"
+    # }
+    # await ws.send(json.dumps(trade_params))
+
 # --- MAIN EXECUTION ---
 async def main():
     initialize_csv()
     print("\033[96m" + "━"*70)
-    print(f"● VOLATILITY INDEX TRACKER | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"● VOLATILITY INDEX SIGNAL GENERATOR | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"● SYMBOLS: {', '.join(SYMBOLS)}")
     print(f"● CONFIG: Strength={STRONG_LEVEL_THRESHOLD} hits | Signals/day={MAX_SIGNALS_PER_DAY}")
+    print(f"● MODE: Signal generation only (no real positions taken)")
     print("━"*70 + "\033[0m")
     
     while True:
@@ -237,4 +273,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\033[94m\n● Tracking stopped by user ●\033[0m")
+        print("\033[94m\n● Signal generation stopped by user ●\033[0m")
