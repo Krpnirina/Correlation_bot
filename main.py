@@ -152,28 +152,27 @@ async def subscribe_data():
     try:
         async with websockets.connect(url) as ws:
             # Authorization
-            await ws.send(json.dumps({"authorize": API_TOKEN}))
-            auth_resp = json.loads(await ws.recv())
-            
-            if "error" in auth_resp:
-                print(f"\033[91m● Authorization failed: {auth_resp['error']['message']}\033[0m")
+            auth_msg = {"authorize": API_TOKEN}
+            await ws.send(json.dumps(auth_msg))
+            auth_resp = await ws.recv()
+            auth_data = json.loads(auth_resp)
+            if "error" in auth_data:
+                print(f"\033[91m● Authorization failed: {auth_data['error']['message']}\033[0m")
                 return
             print("\033[92m● Authorized successfully.\033[0m")
 
-            # Subscribe to all symbols
-            print(f"\033[95m● Subscribing to {len(SYMBOLS)} volatility indices\033[0m")
+            # Prepare subscription requests
+            print("\033[95m● Preparing subscriptions...\033[0m")
             
+            # Batch 1: Tick subscriptions
             for symbol in SYMBOLS:
-                # Subscribe to ticks
                 tick_sub = {"ticks": symbol, "subscribe": 1}
                 await ws.send(json.dumps(tick_sub))
-                tick_resp = json.loads(await ws.recv())
-                if "error" in tick_resp:
-                    print(f"\033[93m● Tick Error ({symbol}): {tick_resp['error']['message']}\033[0m")
-                else:
-                    print(f"\033[92m● Subscribed to ticks for {symbol}\033[0m")
-                
-                # Subscribe to candles
+                print(f"\033[93m● Sent tick subscription for {symbol}\033[0m")
+                await asyncio.sleep(0.05)
+            
+            # Batch 2: Candle subscriptions
+            for symbol in SYMBOLS:
                 for gran in GRANULARITIES:
                     candle_sub = {
                         "candles": symbol,
@@ -181,14 +180,10 @@ async def subscribe_data():
                         "subscribe": 1
                     }
                     await ws.send(json.dumps(candle_sub))
-                    candle_resp = json.loads(await ws.recv())
-                    if "error" in candle_resp:
-                        print(f"\033[93m● Candle Error ({symbol}/{gran}): {candle_resp['error']['message']}\033[0m")
-                    else:
-                        print(f"\033[92m● Subscribed to {gran} candles for {symbol}\033[0m")
-                
-                await asyncio.sleep(0.1)  # Rate limiting
-
+                    print(f"\033[93m● Sent candle subscription for {symbol}/{gran}\033[0m")
+                    await asyncio.sleep(0.05)
+            
+            print("\033[92m● All subscriptions sent. Starting data processing...\033[0m")
             print(f"\n\033[95m● TRACKING {len(SYMBOLS)} VOLATILITY INDICES\033[0m\n")
 
             # Main processing loop
@@ -197,12 +192,19 @@ async def subscribe_data():
                     message = await asyncio.wait_for(ws.recv(), timeout=30)
                     data = json.loads(message)
                     
-                    if 'tick' in data:
-                        await handle_tick(data['tick'])
-                    elif 'candles' in data:
-                        await handle_candle(data['candles'])
-                    elif 'error' in data:
+                    # Handle different message types
+                    if data.get("msg_type") == "tick":
+                        await handle_tick(data["tick"])
+                    elif data.get("msg_type") == "candles":
+                        await handle_candle(data["candles"])
+                    elif data.get("error"):
                         print(f"\033[93m● API Warning: {data['error']['message']}\033[0m")
+                    elif data.get("echo_req"):
+                        # Skip echo responses
+                        continue
+                    else:
+                        print(f"\033[90m● Unhandled message: {data.get('msg_type')}\033[0m")
+                    
                 except asyncio.TimeoutError:
                     # Send ping to maintain connection
                     await ws.send(json.dumps({"ping": 1}))
