@@ -1,55 +1,52 @@
 import asyncio
 import websockets
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 API_TOKEN = "REzKac9b5BR7DmF"
 APP_ID = 71130
 SYMBOL = "R_100"
 
-M15_DURATION = 15 * 60  # 15 minutes in seconds
-M15_CANDLE_COUNT = 1    # 1 candle = 15min if granularity is 900
+async def get_m15_high_low():
+    uri = "wss://ws.binaryws.com/websockets/v3?app_id=" + str(APP_ID)
 
-async def get_m15_high_low(ws):
-    request = {
-        "ticks_history": SYMBOL,
-        "style": "candles",
-        "granularity": 900,  # 900s = 15min
-        "count": M15_CANDLE_COUNT,
-        "end": "latest"
-    }
-    await ws.send(json.dumps(request))
-    response = await ws.recv()
-    data = json.loads(response)
+    async with websockets.connect(uri) as websocket:
+        # ✅ Authorize
+        await websocket.send(json.dumps({
+            "authorize": API_TOKEN
+        }))
+        auth_response = await websocket.recv()
+        auth_data = json.loads(auth_response)
+        if "error" in auth_data:
+            print("⛔ Authorization failed:", auth_data["error"]["message"])
+            return
+        print("✅ Authorized successfully!\n")
 
-    try:
-        candles = data['candles']
-        highs = [candle['high'] for candle in candles]
-        lows = [candle['low'] for candle in candles]
-        return max(highs), min(lows)
-    except KeyError:
-        print("❌ Tsy nahazo candlestick data.")
-        return None, None
+        # ✅ Request M15 candles (15 min = 900s) - last 2 candles just in case
+        await websocket.send(json.dumps({
+            "ticks_history": SYMBOL,
+            "style": "candles",
+            "granularity": 900,
+            "count": 2,
+            "end": "latest"
+        }))
 
-async def authorize(ws):
-    await ws.send(json.dumps({"authorize": API_TOKEN}))
-    response = await ws.recv()
-    data = json.loads(response)
-    if data.get("msg_type") == "authorize":
-        print("✅ Authorized successfully!")
-    else:
-        print("❌ Authorization failed.")
+        candles_response = await websocket.recv()
+        candles_data = json.loads(candles_response)
 
-async def main():
-    uri = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
-    async with websockets.connect(uri) as ws:
-        await authorize(ws)
-        m15_high, m15_low = await get_m15_high_low(ws)
-        if m15_high is not None:
-            print(f"🟢 M15 High: {m15_high}")
-            print(f"🔵 M15 Low: {m15_low}")
-        else:
-            print("⚠️ Tsy nahazo M15 High/Low.")
+        # ✅ Check for errors
+        if "error" in candles_data:
+            print("⛔ Error fetching candles:", candles_data["error"]["message"])
+            return
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        candles = candles_data["history"]["candles"]
+
+        # ✅ Calculate M15 high and low
+        m15_high = max(candle["high"] for candle in candles)
+        m15_low = min(candle["low"] for candle in candles)
+
+        print(f"🟢 M15 High: {m15_high}")
+        print(f"🔵 M15 Low: {m15_low}")
+
+# 🔁 Run the function
+asyncio.run(get_m15_high_low())
