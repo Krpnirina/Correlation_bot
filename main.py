@@ -8,11 +8,11 @@ from collections import deque, defaultdict
 # --- CONFIGURATION ---
 CSV_FILE = "trading_journal.csv"
 TRADE_HISTORY_FILE = "trade_history.csv"
-STRONG_LEVEL_THRESHOLD = 3
+STRONG_LEVEL_THRESHOLD = 0
 SUPPORT_ZONE_PERCENT = 0.115
 RESISTANCE_ZONE_PERCENT = 0.115
 TICKS_WINDOW_HOURS = 24
-MIN_TICKS_REQUIRED = 900
+MIN_TICKS_REQUIRED = 300
 VOLUME_THRESHOLD = 500
 MAX_SIGNALS_PER_DAY = 4
 API_TOKEN = "REzKac9b5BR7DmF"
@@ -66,33 +66,29 @@ def initialize_files():
             "stake", "stop_loss", "take_profit", "duration", "result", "payout"
         ])
 
-# --- VOLUME CHECK (RELAXED) ---
+# --- VOLUME CHECK (ONLY 15m CANDLE) ---
 def volume_confirmed(symbol):
-    c1d = candles_data[symbol]["1d"]
-    c4h = candles_data[symbol]["4h"]
     c15m = candles_data[symbol]["15m"]
-    
-    return any([
-        (c1d and c1d["volume"] >= VOLUME_THRESHOLD),
-        (c4h and c4h["volume"] >= VOLUME_THRESHOLD),
-        (c15m and c15m["volume"] >= VOLUME_THRESHOLD),
-        (c1d and c4h and c15m and 
-         c1d["volume"] > 50 and 
-         c4h["volume"] > 50 and 
-         c15m["volume"] > 50)
-    ])
+    return c15m is not None and c15m["volume"] >= VOLUME_THRESHOLD
 
 # --- TRADE EXECUTION ---
 async def execute_trade(ws, symbol, price, level_type, strength):
+    """Execute real trade on Deriv API"""
     if not TRADING_ENABLED:
         print(f"\033[93m● [SIMULATION] Would execute {'BUY' if level_type == 'SUPPORT' else 'SELL'} on {symbol} @ {price:.5f}\033[0m")
         return f"SIM-{datetime.now().timestamp()}"
 
+    # Generate unique trade ID
     trade_id = f"{symbol}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    
+    # Determine contract type
     contract_type = "CALL" if level_type == "SUPPORT" else "PUT"
+    
+    # Calculate stop loss and take profit
     stop_loss = price * (1 - STOP_LOSS_PERCENT/100) if level_type == "SUPPORT" else price * (1 + STOP_LOSS_PERCENT/100)
     take_profit = price * (1 + TAKE_PROFIT_PERCENT/100) if level_type == "SUPPORT" else price * (1 - TAKE_PROFIT_PERCENT/100)
     
+    # Prepare trade request
     trade_request = {
         "buy": 1,
         "price": TRADE_AMOUNT,
@@ -109,16 +105,19 @@ async def execute_trade(ws, symbol, price, level_type, strength):
         }
     }
     
+    # Send trade request
     await ws.send(json.dumps(trade_request))
     response = await ws.recv()
     trade_data = json.loads(response)
     
+    # Handle trade response
     if "error" in trade_data:
         print(f"\033[91m● Trade Error: {trade_data['error']['message']}\033[0m")
         return None
     
     print(f"\033[92m● Trade Executed: {contract_type} on {symbol} @ {price:.5f} (ID: {trade_id})\033[0m")
     
+    # Log trade
     with open(TRADE_HISTORY_FILE, mode='a', newline='') as file:
         writer = csv.writer(file)
         writer.writerow([
@@ -128,6 +127,7 @@ async def execute_trade(ws, symbol, price, level_type, strength):
             f"{TRADE_DURATION}m", "OPEN", ""
         ])
     
+    # Store active trade
     daily_data[symbol]["active_trades"][trade_id] = {
         "entry_price": price,
         "contract_type": contract_type,
@@ -139,6 +139,7 @@ async def execute_trade(ws, symbol, price, level_type, strength):
 
 # --- SIGNAL PROCESSING AND TRADING ---
 async def handle_signal(ws, symbol, price, level_type, strength, m15_min, m15_max, timestamp):
+    """Process signal and execute trade"""
     color = "\033[91m" if level_type == "SUPPORT" else "\033[92m"
     reset = "\033[0m"
     
@@ -147,6 +148,7 @@ async def handle_signal(ws, symbol, price, level_type, strength, m15_min, m15_ma
     vol_status = "✅" if volume_confirmed(symbol) else "⚠️"
     action = "BUY" if level_type == "SUPPORT" else "SELL"
     
+    # Execute trade
     trade_id = await execute_trade(ws, symbol, price, level_type, strength)
     
     print(f"{color}┏{'━'*70}┓")
@@ -157,6 +159,7 @@ async def handle_signal(ws, symbol, price, level_type, strength, m15_min, m15_ma
     print(f"┃ {'Time:'.ljust(10)} {time_str}")
     print(f"┗{'━'*70}┛{reset}")
 
+    # Log to CSV
     with open(CSV_FILE, mode='a', newline='') as file:
         writer = csv.writer(file)
         writer.writerow([
@@ -187,9 +190,11 @@ async def handle_tick(tick, trade_ws):
     data = daily_data[symbol]
     data["ticks"].append((price, now))
 
+    # Maintain 24-hour window
     while data["ticks"] and (now - data["ticks"][0][1]) > timedelta(hours=TICKS_WINDOW_HOURS):
         data["ticks"].popleft()
 
+    # Periodic status update
     if len(data["ticks"]) % 25 == 0:
         print(f"\033[94m[{symbol}] ➜ Collected {len(data['ticks'])} ticks | Signals left: {MAX_SIGNALS_PER_DAY - data['signal_counts']} | Active trades: {len(data['active_trades'])}\033[0m")
 
@@ -197,7 +202,8 @@ async def handle_tick(tick, trade_ws):
         prices = [p for p, _ in data["ticks"]]
         m15_min, m15_max = min(prices), max(prices)
         range_val = m15_max - m15_min
-
+        
+        # Dynamic zones
         support_zone = m15_min + (range_val * SUPPORT_ZONE_PERCENT)
         resistance_zone = m15_max - (range_val * RESISTANCE_ZONE_PERCENT)
 
@@ -206,10 +212,10 @@ async def handle_tick(tick, trade_ws):
             data["support_hits"][key] += 1
             strength = data["support_hits"][key]
 
-            if (strength >= STRONG_LEVEL_THRESHOLD and
-                key not in data["levels_printed"] and
+            if (strength >= STRONG_LEVEL_THRESHOLD and 
+                key not in data["levels_printed"] and 
                 data["signal_counts"] < MAX_SIGNALS_PER_DAY):
-
+                
                 data["levels_printed"].add(key)
                 data["signal_counts"] += 1
                 await handle_signal(trade_ws, symbol, price, "SUPPORT", strength, m15_min, m15_max, timestamp)
@@ -219,22 +225,24 @@ async def handle_tick(tick, trade_ws):
             data["resistance_hits"][key] += 1
             strength = data["resistance_hits"][key]
 
-            if (strength >= STRONG_LEVEL_THRESHOLD and
-                key not in data["levels_printed"] and
+            if (strength >= STRONG_LEVEL_THRESHOLD and 
+                key not in data["levels_printed"] and 
                 data["signal_counts"] < MAX_SIGNALS_PER_DAY):
-
+                
                 data["levels_printed"].add(key)
                 data["signal_counts"] += 1
                 await handle_signal(trade_ws, symbol, price, "RESISTANCE", strength, m15_min, m15_max, timestamp)
 
 # --- WEBSOCKET MANAGEMENT ---
 async def run_trading_system():
+    # Create separate connections for market data and trading
     market_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
     trade_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
     
     async with websockets.connect(market_url) as market_ws, \
                websockets.connect(trade_url) as trade_ws:
         
+        # Authorize both connections
         for ws in [market_ws, trade_ws]:
             await ws.send(json.dumps({"authorize": API_TOKEN}))
             auth_resp = await ws.recv()
@@ -244,9 +252,12 @@ async def run_trading_system():
                 return
         print("\033[92m● Authorized successfully for both connections.\033[0m")
 
+        # Subscribe to market data
         print("\033[95m● Subscribing to market data...\033[0m")
         for symbol in SYMBOLS:
+            # Ticks
             await market_ws.send(json.dumps({"ticks": symbol, "subscribe": 1}))
+            # Candles
             for gran in GRANULARITIES:
                 await market_ws.send(json.dumps({
                     "candles": symbol,
@@ -259,11 +270,13 @@ async def run_trading_system():
         print(f"\n\033[95m● AUTOMATED TRADING ACTIVE | {len(SYMBOLS)} VOLATILITY INDICES\033[0m\n")
         print(f"\033[93m● TRADING {'ENABLED' if TRADING_ENABLED else 'DISABLED'} | Amount: ${TRADE_AMOUNT} | Duration: {TRADE_DURATION} min\033[0m")
 
+        # Main processing loop
         while True:
             try:
                 message = await asyncio.wait_for(market_ws.recv(), timeout=30)
                 data = json.loads(message)
                 
+                # Handle market data
                 if 'tick' in data:
                     await handle_tick(data['tick'], trade_ws)
                 elif 'candles' in data:
@@ -272,6 +285,7 @@ async def run_trading_system():
                     print(f"\033[93m● API Warning: {data['error']['message']}\033[0m")
                     
             except asyncio.TimeoutError:
+                # Send ping to maintain connection
                 await market_ws.send(json.dumps({"ping": 1}))
                 await trade_ws.send(json.dumps({"ping": 1}))
             except Exception as e:
