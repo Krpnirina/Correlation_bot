@@ -8,7 +8,7 @@ from collections import deque, defaultdict
 # --- CONFIGURATION ---
 CSV_FILE = "trading_journal.csv"
 TRADE_HISTORY_FILE = "trade_history.csv"
-STRONG_LEVEL_THRESHOLD = 2
+STRONG_LEVEL_THRESHOLD = 0
 SUPPORT_ZONE_PERCENT = 0.115
 RESISTANCE_ZONE_PERCENT = 0.115
 TICKS_WINDOW_HOURS = 24
