@@ -132,7 +132,8 @@ class SymbolBot:
         logging.info(f"📊 [{self.symbol}] Trade sent: {signal} | Stake: ${stake_amount:.2f} | Martingale step: {self.martingale_step}")
         self.trade_open = True
 
-        await asyncio.sleep(65)
+        # Attendre la fin du contrat (2 minutes + buffer)
+        await asyncio.sleep(125)
 
         await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
         result_response = await self.recv()
