@@ -112,7 +112,7 @@ class SymbolBot:
             "basis": "stake",
             "contract_type": signal,
             "currency": "USD",
-            "duration": 1,
+            "duration": 2,
             "duration_unit": "m",
             "symbol": self.symbol
         })
