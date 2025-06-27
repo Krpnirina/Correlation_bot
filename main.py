@@ -11,7 +11,7 @@ CONFIG = {
     "INITIAL_STAKE": 0.35,
     "MARTINGALE_MULTIPLIER": 2.05,
     "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"],
-    "GRANULARITY": 60,
+    "GRANULARITY": 300,
     "MIN_CANDLES_REQUIRED": 5,
     "VOLUME_THRESHOLD": 0.5
 }
@@ -112,7 +112,7 @@ class SymbolBot:
             "basis": "stake",
             "contract_type": signal,
             "currency": "USD",
-            "duration": 2,
+            "duration": 3,
             "duration_unit": "m",
             "symbol": self.symbol
         })
@@ -132,8 +132,8 @@ class SymbolBot:
         logging.info(f"📊 [{self.symbol}] Trade sent: {signal} | Stake: ${stake_amount:.2f} | Martingale step: {self.martingale_step}")
         self.trade_open = True
 
-        # Attendre la fin du contrat (2 minutes + buffer)
-        await asyncio.sleep(125)
+        # Attendre la fin du contrat (3 minutes + buffer)
+        await asyncio.sleep(185)
 
         await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
         result_response = await self.recv()
