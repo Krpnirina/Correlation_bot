@@ -157,6 +157,53 @@ class MasterBot(SymbolSingleAccount):
         logging.info(f"[{self.symbol}] No valid pattern found.")
         return None
 
+    async def execute_trade(self, signal, stake_amount):
+        try:
+            await self.send({
+                "proposal": 1,
+                "amount": round(stake_amount, 2),
+                "basis": "stake",
+                "contract_type": signal,
+                "currency": "USD",
+                "duration": 2,
+                "duration_unit": "m",
+                "symbol": self.symbol
+            })
+            proposal_response = await self.recv()
+            proposal_id = proposal_response.get("proposal", {}).get("id")
+            if not proposal_id:
+                logging.error(f"[{self.symbol}] Proposal failed | Token: {self.token[:5]}...")
+                return False
+
+            await self.send({"buy": proposal_id, "price": round(stake_amount, 2)})
+            buy_response = await self.recv()
+            contract_id = buy_response.get("buy", {}).get("contract_id")
+            if not contract_id:
+                logging.error(f"[{self.symbol}] Buy failed | Token: {self.token[:5]}...")
+                return False
+
+            logging.info(f"📊 [{self.symbol}] Trade sent on {self.token[:5]}... | Signal: {signal} | Stake: ${stake_amount:.2f}")
+
+            # Wait contract result
+            await asyncio.sleep(125)
+
+            await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
+            result_response = await self.recv()
+            contract_info = result_response.get("proposal_open_contract", {})
+            profit = float(contract_info.get("profit", 0))
+
+            if profit > 0:
+                logging.info(f"✅ [{self.symbol}] WIN on {self.token[:5]}... | Profit: ${profit:.2f}")
+                self.martingale_step = 0
+                return True
+            else:
+                logging.info(f"❌ [{self.symbol}] LOSS on {self.token[:5]}... | Loss: ${abs(profit):.2f}")
+                self.martingale_step += 1
+                return False
+        except Exception as e:
+            logging.error(f"[{self.symbol}] Trade execution error: {e}")
+            return False
+
 
 # ------------------------- MULTI-ACCOUNT MANAGER -------------------------
 
@@ -182,8 +229,7 @@ class MultiAccountBot:
             if signal:
                 stake_amount = CONFIG["INITIAL_STAKE"] * (CONFIG["MARTINGALE_MULTIPLIER"] ** self.master_account.martingale_step)
 
-                # Execute trade on master
-                await self.master_account.execute_trade(signal, stake_amount)
+                result = await self.master_account.execute_trade(signal, stake_amount)
 
                 # Execute trade on all followers
                 for follower in self.followers:
