@@ -11,7 +11,7 @@ CONFIG = {
     "INITIAL_STAKE": 0.35,
     "MARTINGALE_MULTIPLIER": 3,
     "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"],
-    "GRANULARITY": 300,   # ⭐ 5 min candles (300s)
+    "GRANULARITY": 120,   # ⭐ Changed from 300 → 120 (2 min candles)
     "MIN_CANDLES_REQUIRED": 5,
     "VOLUME_THRESHOLD": 0.5
 }
@@ -112,7 +112,7 @@ class SymbolBot:
             "basis": "stake",
             "contract_type": signal,
             "currency": "USD",
-            "duration": 2,                 # ⭐ changed from 3 → 2 minutes
+            "duration": 2,
             "duration_unit": "m",
             "symbol": self.symbol
         })
@@ -133,7 +133,7 @@ class SymbolBot:
         self.trade_open = True
 
         # Attendre la fin du contrat (2 minutes + buffer)
-        await asyncio.sleep(125)          # ⭐ changed from 185 → 125 (2 min + ~5 sec buffer)
+        await asyncio.sleep(125)
 
         await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
         result_response = await self.recv()
