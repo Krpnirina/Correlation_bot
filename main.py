@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import websockets
+from statistics import mean
 
 # ------------------------- CONFIGURATION -------------------------
 
@@ -10,9 +11,16 @@ CONFIG = {
     "INITIAL_STAKE": 0.35,
     "MARTINGALE_MULTIPLIER": 3,
     "GRANULARITY": 120,
-    "MIN_CANDLES_REQUIRED": 5,
-    "VOLUME_THRESHOLD": 0.5,
-    "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"]
+    "MIN_CANDLES_REQUIRED": 30,  # Increased from 5 to 30
+    "VOLATILITY_THRESHOLD": 0.5,  # Max average candle body size
+    "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"],
+    "SYMBOL_MULTIPLIERS": {  # Adjust stake based on symbol volatility
+        "R_10": 1.0,
+        "R_25": 0.8,
+        "R_50": 0.6,
+        "R_75": 0.5,
+        "R_100": 0.3
+    }
 }
 
 # ------------------------- ACCOUNTS CONFIG -------------------------
@@ -21,8 +29,6 @@ ACCOUNTS = [
     {"token": "REzKac9b5BR7DmF", "role": "master"},
     {"token": "TOKEN_FOLLOWER1", "role": "follower"},
     {"token": "TOKEN_FOLLOWER2", "role": "follower"},
-    # Afaka manampy comptes vaovao eto
-    # {"token": "TOKEN_FOLLOWER_X", "role": "follower"},
 ]
 
 # ------------------------- LOGGING -------------------------
@@ -31,7 +37,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
 
 # ------------------------- SINGLE ACCOUNT BOT -------------------------
 
@@ -68,6 +73,9 @@ class SymbolSingleAccount:
 
     async def execute_trade(self, signal, stake_amount):
         try:
+            # Apply symbol-specific stake multiplier
+            stake_amount *= CONFIG["SYMBOL_MULTIPLIERS"].get(self.symbol, 1.0)
+            
             await self.send({
                 "proposal": 1,
                 "amount": round(stake_amount, 2),
@@ -112,7 +120,6 @@ class SymbolSingleAccount:
         if self.ws:
             await self.ws.close()
 
-
 # ------------------------- MASTER BOT -------------------------
 
 class MasterBot(SymbolSingleAccount):
@@ -124,7 +131,7 @@ class MasterBot(SymbolSingleAccount):
         await self.send({
             "ticks_history": self.symbol,
             "end": "latest",
-            "count": 10,
+            "count": CONFIG["MIN_CANDLES_REQUIRED"],
             "granularity": CONFIG["GRANULARITY"],
             "style": "candles"
         })
@@ -135,8 +142,22 @@ class MasterBot(SymbolSingleAccount):
     def analyze_signal(self, candles):
         if len(candles) < CONFIG["MIN_CANDLES_REQUIRED"]:
             logging.info(f"[{self.symbol}] Not enough candles.")
-            return None
+            return None, None
 
+        # Calculate volatility (average candle body size)
+        body_sizes = [abs(c['close'] - c['open']) for c in candles[-5:]]
+        avg_body = mean(body_sizes)
+        if avg_body > CONFIG["VOLATILITY_THRESHOLD"]:
+            logging.info(f"[{self.symbol}] Market too volatile (avg body {avg_body:.4f}), skipping.")
+            return None, None
+
+        # Calculate SMA for trend confirmation
+        closes = [c["close"] for c in candles[-10:]]
+        sma = mean(closes)
+        current_close = candles[-1]["close"]
+        trend = "bullish" if current_close > sma else "bearish"
+
+        # Pattern detection
         body_colors = []
         for candle in candles[-5:]:
             if candle['close'] > candle['open']:
@@ -149,13 +170,29 @@ class MasterBot(SymbolSingleAccount):
         trend_color = body_colors[0]
         if all(c == trend_color for c in body_colors[:4]):
             last = body_colors[4]
-            if trend_color == "green" and last == "red":
-                return "PUT"
-            elif trend_color == "red" and last == "green":
-                return "CALL"
+            if trend_color == last:
+                # Continuation pattern - stronger signal
+                signal = "CALL" if trend_color == "green" else "PUT"
+                
+                # Confirm with SMA trend
+                if (signal == "CALL" and trend == "bullish") or (signal == "PUT" and trend == "bearish"):
+                    return signal, 1.0  # Full stake for confirmed trend continuation
+                else:
+                    logging.info(f"[{self.symbol}] Continuation pattern but conflicting with SMA trend, skipping.")
+                    return None, None
+            else:
+                # Reversal pattern - weaker signal
+                signal = "PUT" if trend_color == "green" else "CALL"
+                
+                # Confirm with SMA trend
+                if (signal == "CALL" and trend == "bullish") or (signal == "PUT" and trend == "bearish"):
+                    return signal, 0.5  # Half stake for reversal with trend confirmation
+                else:
+                    logging.info(f"[{self.symbol}] Reversal pattern but conflicting with SMA trend, skipping.")
+                    return None, None
 
         logging.info(f"[{self.symbol}] No valid pattern found.")
-        return None
+        return None, None
 
     async def execute_trade(self, signal, stake_amount):
         try:
@@ -204,7 +241,6 @@ class MasterBot(SymbolSingleAccount):
             logging.error(f"[{self.symbol}] Trade execution error: {e}")
             return False
 
-
 # ------------------------- MULTI-ACCOUNT MANAGER -------------------------
 
 class MultiAccountBot:
@@ -225,10 +261,14 @@ class MultiAccountBot:
                 continue
 
             candles = await self.master_account.get_candles()
-            signal = self.master_account.analyze_signal(candles)
+            signal, stake_multiplier = self.master_account.analyze_signal(candles)
+            
             if signal:
-                stake_amount = CONFIG["INITIAL_STAKE"] * (CONFIG["MARTINGALE_MULTIPLIER"] ** self.master_account.martingale_step)
-
+                # Calculate stake with martingale and pattern multiplier
+                stake_amount = (CONFIG["INITIAL_STAKE"] * 
+                              (CONFIG["MARTINGALE_MULTIPLIER"] ** self.master_account.martingale_step) * 
+                              stake_multiplier)
+                
                 result = await self.master_account.execute_trade(signal, stake_amount)
 
                 # Execute trade on all followers
@@ -239,7 +279,6 @@ class MultiAccountBot:
 
             await self.master_account.close()
             await asyncio.sleep(5)
-
 
 # ------------------------- MAIN -------------------------
 
