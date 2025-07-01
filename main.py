@@ -19,7 +19,7 @@ CONFIG = {
 
 ACCOUNTS = [
     {"token": "REzKac9b5BR7DmF", "role": "master"},
-    {"token": "AsJ16KqE7Ta0tFu", "role": "follower"},
+    {"token": "TOKEN_FOLLOWER1", "role": "follower"},
     {"token": "TOKEN_FOLLOWER2", "role": "follower"},
     # Afaka manampy comptes vaovao eto
     # {"token": "TOKEN_FOLLOWER_X", "role": "follower"},
