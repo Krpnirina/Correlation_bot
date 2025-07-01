@@ -82,7 +82,7 @@ class SymbolSingleAccount:
                 "basis": "stake",
                 "contract_type": signal,
                 "currency": "USD",
-                "duration": 2,
+                "duration": 4,
                 "duration_unit": "m",
                 "symbol": self.symbol
             })
