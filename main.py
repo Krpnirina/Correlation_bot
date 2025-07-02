@@ -7,17 +7,17 @@ from statistics import mean
 # ------------------------- CONFIGURATION -------------------------
 
 CONFIG = {
-    "APP_ID": 71130,
+    "APP_ID": 76510,
     "INITIAL_STAKE": 0.35,
     "MARTINGALE_MULTIPLIER": 3,
-    "GRANULARITY": 60,  # 1 minute
-    "MIN_CANDLES_REQUIRED": 30,
-    "VOLATILITY_THRESHOLD": 0.5,
+    "GRANULARITY": 300,  # 5 minutes
+    "MIN_CANDLES_REQUIRED": 36,
+    "VOLATILITY_THRESHOLD": 0.25,
     "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"],
     "SYMBOL_MULTIPLIERS": {
         "R_10": 1.0,
-        "R_25": 0.8,
-        "R_50": 0.6,
+        "R_25": 0.9,
+        "R_50": 0.7,
         "R_75": 0.5,
         "R_100": 0.3
     }
@@ -26,7 +26,7 @@ CONFIG = {
 # ------------------------- ACCOUNTS CONFIG -------------------------
 
 ACCOUNTS = [
-    {"token": "REzKac9b5BR7DmF", "role": "master"},
+    {"token": "LDG7hjLbnbK6dRu", "role": "master"},
     {"token": "TOKEN_FOLLOWER1", "role": "follower"},
     {"token": "TOKEN_FOLLOWER2", "role": "follower"},
 ]
@@ -80,7 +80,7 @@ class SymbolSingleAccount:
                 "basis": "stake",
                 "contract_type": signal,
                 "currency": "USD",
-                "duration": 1,
+                "duration": 60,
                 "duration_unit": "m",
                 "symbol": self.symbol
             })
@@ -190,7 +190,7 @@ class MasterBot(SymbolSingleAccount):
                 "basis": "stake",
                 "contract_type": signal,
                 "currency": "USD",
-                "duration": 1,
+                "duration": 60,
                 "duration_unit": "m",
                 "symbol": self.symbol
             })
@@ -251,8 +251,8 @@ class MultiAccountBot:
             signal, stake_multiplier = self.master_account.analyze_signal(candles)
 
             if signal:
-                stake_amount = (CONFIG["INITIAL_STAKE"] * 
-                                (CONFIG["MARTINGALE_MULTIPLIER"] ** self.master_account.martingale_step) * 
+                stake_amount = (CONFIG["INITIAL_STAKE"] *
+                                (CONFIG["MARTINGALE_MULTIPLIER"] ** self.master_account.martingale_step) *
                                 stake_multiplier)
 
                 tasks = [self.master_account.execute_trade(signal, stake_amount)]
