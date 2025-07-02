@@ -26,7 +26,7 @@ CONFIG = {
 # ------------------------- ACCOUNTS CONFIG -------------------------
 
 ACCOUNTS = [
-    {"token": "LDG7hjLbnbK6dRu", "role": "master"},
+    {"token": "REzKac9b5BR7DmF", "role": "master"},
     {"token": "TOKEN_FOLLOWER1", "role": "follower"},
     {"token": "TOKEN_FOLLOWER2", "role": "follower"},
 ]
