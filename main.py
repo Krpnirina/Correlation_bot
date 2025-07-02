@@ -10,7 +10,7 @@ CONFIG = {
     "APP_ID": 71130,
     "INITIAL_STAKE": 0.35,
     "MARTINGALE_MULTIPLIER": 3,
-    "GRANULARITY": 30,  # 30s
+    "GRANULARITY": 60,  # 1 minute
     "MIN_CANDLES_REQUIRED": 30,
     "VOLATILITY_THRESHOLD": 0.5,
     "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"],
