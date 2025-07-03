@@ -7,7 +7,7 @@ from statistics import mean
 # ------------------------- CONFIGURATION -------------------------
 
 CONFIG = {
-    "APP_ID": 80538,
+    "APP_ID": 71130,
     "INITIAL_STAKE": 0.35,
     "MARTINGALE_MULTIPLIER": 3,
     "GRANULARITY": 60,  # 5 minutes
