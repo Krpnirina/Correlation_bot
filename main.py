@@ -27,8 +27,8 @@ CONFIG = {
 
 ACCOUNTS = [
     {"token": "REzKac9b5BR7DmF", "role": "master"},
+    {"token": "LPt8fWWWpTS8oLl", "role": "follower"},
     {"token": "TOKEN_FOLLOWER1", "role": "follower"},
-    {"token": "TOKEN_FOLLOWER2", "role": "follower"},
 ]
 
 # ------------------------- LOGGING -------------------------
