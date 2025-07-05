@@ -2,34 +2,19 @@ import asyncio
 import json
 import logging
 import websockets
-from statistics import mean
 
 # ------------------------- CONFIGURATION -------------------------
 
 CONFIG = {
     "APP_ID": 71130,
+    "TOKEN": "REzKac9b5BR7DmF",
     "INITIAL_STAKE": 0.35,
-    "MARTINGALE_MULTIPLIER": 3,
-    "GRANULARITY": 60,  # 5 minutes
-    "MIN_CANDLES_REQUIRED": 36,
-    "VOLATILITY_THRESHOLD": 0.25,
-    "SYMBOLS": ["R_10", "R_25", "R_50", "R_75", "R_100"],
-    "SYMBOL_MULTIPLIERS": {
-        "R_10": 1.0,
-        "R_25": 0.9,
-        "R_50": 0.7,
-        "R_75": 0.5,
-        "R_100": 0.3
-    }
+    "MARTINGALE_MULTIPLIER": 2.05,
+    "SYMBOLS": [],  # Ho fenoina dynamique
+    "GRANULARITY": 300,  # 5 minutes candles
+    "MIN_CANDLES_REQUIRED": 5,
+    "VOLUME_THRESHOLD": 0.5
 }
-
-# ------------------------- ACCOUNTS CONFIG -------------------------
-
-ACCOUNTS = [
-    {"token": "REzKac9b5BR7DmF", "role": "master"},
-    {"token": "LPt8fWWWpTS8oLl", "role": "follower"},
-    {"token": "TOKEN_FOLLOWER1", "role": "follower"},
-]
 
 # ------------------------- LOGGING -------------------------
 
@@ -38,27 +23,60 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# ------------------------- SINGLE ACCOUNT BOT -------------------------
 
-class SymbolSingleAccount:
+async def load_symbols(token):
+    """
+    Maka automatique symboles rehetra afaka CALL/PUT amin'ny Deriv
+    """
+    uri = f"wss://ws.derivws.com/websockets/v3?app_id={CONFIG['APP_ID']}"
+    try:
+        async with websockets.connect(uri) as ws:
+            # authorize
+            await ws.send(json.dumps({"authorize": token}))
+            await ws.recv()
+
+            # active symbols
+            await ws.send(json.dumps({
+                "active_symbols": "brief",
+                "product_type": "basic"
+            }))
+            resp = json.loads(await ws.recv())
+
+            symbols = []
+            for s in resp.get("active_symbols", []):
+                # Atao maximal: tous symbols misokatra
+                if s.get("exchange_is_open", False):
+                    symbols.append(s["symbol"])
+
+            logging.info(f"✅ Loaded {len(symbols)} symbols dynamically.")
+            return symbols
+    except Exception as e:
+        logging.error(f"Error loading symbols: {e}")
+        return []
+
+
+class SymbolBot:
     def __init__(self, symbol, token):
         self.symbol = symbol
         self.token = token
         self.ws = None
         self.balance = 0
+        self.trade_open = False
+        self.martingale_step = 0
+        self.stake = CONFIG["INITIAL_STAKE"]
+        self.volume_stats = []
 
     async def connect(self):
         try:
             self.ws = await websockets.connect(
-                f"wss://ws.derivws.com/websockets/v3?app_id={CONFIG['APP_ID']}"
-            )
+                f"wss://ws.derivws.com/websockets/v3?app_id={CONFIG['APP_ID']}")
             await self.send({"authorize": self.token})
             response = await self.recv()
             if "error" in response:
-                logging.error(f"[{self.symbol}] Auth failed: {response['error'].get('message')} | Token: {self.token[:5]}...")
+                logging.error(f"[{self.symbol}] Auth failed: {response['error'].get('message')}")
                 return False
             self.balance = float(response['authorize']['balance'])
-            logging.info(f"✅ [{self.symbol}] Connected | Balance: {self.balance:.2f} USD | Token: {self.token[:5]}...")
+            logging.info(f"✅ [{self.symbol}] Connected | Balance: {self.balance:.2f} USD")
             return True
         except Exception as e:
             logging.error(f"[{self.symbol}] Connection error: {e}")
@@ -71,86 +89,28 @@ class SymbolSingleAccount:
         response = json.loads(await self.ws.recv())
         return response
 
-    async def execute_trade(self, signal, stake_amount):
-        try:
-            stake_amount *= CONFIG["SYMBOL_MULTIPLIERS"].get(self.symbol, 1.0)
-            await self.send({
-                "proposal": 1,
-                "amount": round(stake_amount, 2),
-                "basis": "stake",
-                "contract_type": signal,
-                "currency": "USD",
-                "duration": 60,
-                "duration_unit": "m",
-                "symbol": self.symbol
-            })
-            proposal_response = await self.recv()
-            proposal_id = proposal_response.get("proposal", {}).get("id")
-            if not proposal_id:
-                logging.error(f"[{self.symbol}] Proposal failed | Token: {self.token[:5]}...")
-                return
-
-            await self.send({"buy": proposal_id, "price": round(stake_amount, 2)})
-            buy_response = await self.recv()
-            contract_id = buy_response.get("buy", {}).get("contract_id")
-            if not contract_id:
-                logging.error(f"[{self.symbol}] Buy failed | Token: {self.token[:5]}...")
-                return
-
-            logging.info(f"📊 [{self.symbol}] Trade sent on {self.token[:5]}... | Signal: {signal} | Stake: ${stake_amount:.2f}")
-
-            await asyncio.sleep(125)
-
-            await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
-            result_response = await self.recv()
-            contract_info = result_response.get("proposal_open_contract", {})
-            profit = float(contract_info.get("profit", 0))
-
-            if profit > 0:
-                logging.info(f"✅ [{self.symbol}] WIN on {self.token[:5]}... | Profit: ${profit:.2f}")
-            else:
-                logging.info(f"❌ [{self.symbol}] LOSS on {self.token[:5]}... | Loss: ${abs(profit):.2f}")
-        except Exception as e:
-            logging.error(f"[{self.symbol}] Trade execution error: {e}")
-
-    async def close(self):
-        if self.ws:
-            await self.ws.close()
-
-# ------------------------- MASTER BOT -------------------------
-
-class MasterBot(SymbolSingleAccount):
-    def __init__(self, symbol, token):
-        super().__init__(symbol, token)
-        self.martingale_step = 0
-
     async def get_candles(self):
         await self.send({
             "ticks_history": self.symbol,
             "end": "latest",
-            "count": CONFIG["MIN_CANDLES_REQUIRED"],
+            "count": 10,
             "granularity": CONFIG["GRANULARITY"],
             "style": "candles"
         })
         candles_response = await self.recv()
         candles = candles_response.get("candles", [])
+        self.volume_stats = [c.get("volume", 0) for c in candles if "volume" in c]
         return candles
+
+    def is_weak_volume(self, last_candle):
+        if not self.volume_stats:
+            return True
+        avg_volume = sum(self.volume_stats[:-1]) / max(len(self.volume_stats[:-1]), 1)
+        return last_candle['volume'] < avg_volume * CONFIG["VOLUME_THRESHOLD"]
 
     def analyze_signal(self, candles):
         if len(candles) < CONFIG["MIN_CANDLES_REQUIRED"]:
-            logging.info(f"[{self.symbol}] Not enough candles.")
-            return None, None
-
-        body_sizes = [abs(c['close'] - c['open']) for c in candles[-5:]]
-        avg_body = mean(body_sizes)
-        if avg_body > CONFIG["VOLATILITY_THRESHOLD"]:
-            logging.info(f"[{self.symbol}] Market too volatile (avg body {avg_body:.4f}), skipping.")
-            return None, None
-
-        closes = [c["close"] for c in candles[-10:]]
-        sma = mean(closes)
-        current_close = candles[-1]["close"]
-        trend = "bullish" if current_close > sma else "bearish"
+            return None
 
         body_colors = []
         for candle in candles[-5:]:
@@ -162,121 +122,98 @@ class MasterBot(SymbolSingleAccount):
                 body_colors.append("doji")
 
         trend_color = body_colors[0]
+
         if all(c == trend_color for c in body_colors[:4]):
             last = body_colors[4]
-            if trend_color == last:
-                signal = "CALL" if trend_color == "green" else "PUT"
-                if (signal == "CALL" and trend == "bullish") or (signal == "PUT" and trend == "bearish"):
-                    return signal, 1.0
-                else:
-                    logging.info(f"[{self.symbol}] Continuation pattern but conflicting with SMA trend, skipping.")
-                    return None, None
-            else:
-                signal = "PUT" if trend_color == "green" else "CALL"
-                if (signal == "CALL" and trend == "bullish") or (signal == "PUT" and trend == "bearish"):
-                    return signal, 0.5
-                else:
-                    logging.info(f"[{self.symbol}] Reversal pattern but conflicting with SMA trend, skipping.")
-                    return None, None
+            prev_candle = candles[-2]
 
-        logging.info(f"[{self.symbol}] No valid pattern found.")
-        return None, None
+            if not self.is_weak_volume(prev_candle):
+                return None
 
-    async def execute_trade(self, signal, stake_amount):
-        try:
-            await self.send({
-                "proposal": 1,
-                "amount": round(stake_amount, 2),
-                "basis": "stake",
-                "contract_type": signal,
-                "currency": "USD",
-                "duration": 60,
-                "duration_unit": "m",
-                "symbol": self.symbol
-            })
-            proposal_response = await self.recv()
-            proposal_id = proposal_response.get("proposal", {}).get("id")
-            if not proposal_id:
-                logging.error(f"[{self.symbol}] Proposal failed | Token: {self.token[:5]}...")
-                return False
+            if trend_color == "green" and last == "red":
+                return "PUT"
+            elif trend_color == "red" and last == "green":
+                return "CALL"
 
-            await self.send({"buy": proposal_id, "price": round(stake_amount, 2)})
-            buy_response = await self.recv()
-            contract_id = buy_response.get("buy", {}).get("contract_id")
-            if not contract_id:
-                logging.error(f"[{self.symbol}] Buy failed | Token: {self.token[:5]}...")
-                return False
+        return None
 
-            logging.info(f"📊 [{self.symbol}] Trade sent on {self.token[:5]}... | Signal: {signal} | Stake: ${stake_amount:.2f}")
+    async def execute_trade(self, signal):
+        if self.trade_open:
+            logging.info(f"[{self.symbol}] Trade already open, skipping...")
+            return
 
-            await asyncio.sleep(125)
+        stake_amount = CONFIG["INITIAL_STAKE"] * (CONFIG["MARTINGALE_MULTIPLIER"] ** self.martingale_step)
 
-            await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
-            result_response = await self.recv()
-            contract_info = result_response.get("proposal_open_contract", {})
-            profit = float(contract_info.get("profit", 0))
+        await self.send({
+            "proposal": 1,
+            "amount": round(stake_amount, 2),
+            "basis": "stake",
+            "contract_type": signal,
+            "currency": "USD",
+            "duration": 3,
+            "duration_unit": "m",
+            "symbol": self.symbol
+        })
+        proposal_response = await self.recv()
+        proposal_id = proposal_response.get("proposal", {}).get("id")
+        if not proposal_id:
+            logging.error(f"[{self.symbol}] Proposal failed")
+            return
 
-            if profit > 0:
-                logging.info(f"✅ [{self.symbol}] WIN on {self.token[:5]}... | Profit: ${profit:.2f}")
-                self.martingale_step = 0
-                return True
-            else:
-                logging.info(f"❌ [{self.symbol}] LOSS on {self.token[:5]}... | Loss: ${abs(profit):.2f}")
-                self.martingale_step += 1
-                return False
-        except Exception as e:
-            logging.error(f"[{self.symbol}] Trade execution error: {e}")
-            return False
+        await self.send({"buy": proposal_id, "price": round(stake_amount, 2)})
+        buy_response = await self.recv()
+        contract_id = buy_response.get("buy", {}).get("contract_id")
+        if not contract_id:
+            logging.error(f"[{self.symbol}] Buy failed")
+            return
 
-# ------------------------- MULTI-ACCOUNT MANAGER -------------------------
+        logging.info(f"📊 [{self.symbol}] Trade sent: {signal} | Stake: ${stake_amount:.2f} | Martingale step: {self.martingale_step}")
+        self.trade_open = True
 
-class MultiAccountBot:
-    def __init__(self, accounts, symbol):
-        self.symbol = symbol
-        self.master_account = None
-        self.followers = []
-        for acc in accounts:
-            if acc["role"] == "master":
-                self.master_account = MasterBot(symbol, acc["token"])
-            else:
-                self.followers.append(SymbolSingleAccount(symbol, acc["token"]))
+        await asyncio.sleep(185)
 
-    async def run(self):
+        await self.send({"proposal_open_contract": 1, "contract_id": contract_id})
+        result_response = await self.recv()
+        contract_info = result_response.get("proposal_open_contract", {})
+        profit = float(contract_info.get("profit", 0))
+
+        if profit > 0:
+            logging.info(f"✅ [{self.symbol}] WIN | Profit: ${profit:.2f}")
+            self.martingale_step = 0
+        else:
+            logging.info(f"❌ [{self.symbol}] LOSS | Martingale up")
+            self.martingale_step += 1
+
+        self.trade_open = False
+
+    async def trade_loop(self):
         while True:
-            if not await self.master_account.connect():
+            try:
+                if not await self.connect():
+                    await asyncio.sleep(10)
+                    continue
+                candles = await self.get_candles()
+                signal = self.analyze_signal(candles)
+                if signal:
+                    await self.execute_trade(signal)
+                await self.ws.close()
                 await asyncio.sleep(5)
-                continue
-
-            candles = await self.master_account.get_candles()
-            signal, stake_multiplier = self.master_account.analyze_signal(candles)
-
-            if signal:
-                stake_amount = (CONFIG["INITIAL_STAKE"] *
-                                (CONFIG["MARTINGALE_MULTIPLIER"] ** self.master_account.martingale_step) *
-                                stake_multiplier)
-
-                tasks = [self.master_account.execute_trade(signal, stake_amount)]
-                for follower in self.followers:
-                    if await follower.connect():
-                        tasks.append(follower.execute_trade(signal, stake_amount))
-
-                await asyncio.gather(*tasks)
-
-                for follower in self.followers:
-                    await follower.close()
-
-            await self.master_account.close()
-            await asyncio.sleep(5)
+            except Exception as e:
+                logging.error(f"[{self.symbol}] Error: {e}")
+                await asyncio.sleep(10)
 
 # ------------------------- MAIN -------------------------
 
 async def main():
-    bots = []
-    for symbol in CONFIG["SYMBOLS"]:
-        bot = MultiAccountBot(ACCOUNTS, symbol)
-        bots.append(bot.run())
+    symbols = await load_symbols(CONFIG["TOKEN"])
+    if not symbols:
+        logging.error("No symbols loaded. Exiting.")
+        return
 
-    await asyncio.gather(*bots)
+    CONFIG["SYMBOLS"] = symbols
+
+    bots = [SymbolBot(symbol, CONFIG["TOKEN"]) for symbol in CONFIG["SYMBOLS"]]
+    await asyncio.gather(*(bot.trade_loop() for bot in bots))
 
 if __name__ == "__main__":
     asyncio.run(main())
